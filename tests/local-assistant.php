@@ -1,0 +1,35 @@
+<?php
+declare(strict_types=1);
+// Reutiliza a fixture SQLite e as verificações dos serviços originais, sem banco real.
+ob_start();require __DIR__.'/intelligence.php';ob_end_clean();
+use Core\DB;use Services\{Intelligence,LocalAssistant,HelperConversation};
+$count=0;$_SESSION['user_id']=$admin['id'];$_SESSION['last_activity']=time();
+putenv('AI_MODE=local');putenv('GEMINI_API_KEY=nao-deve-ser-usada-no-modo-local');HelperConversation::clear();
+foreach(['Quais entregas estão atrasadas?'=>'delay','Previsão de demanda para 30 dias'=>'forecast','Qual região tem maior custo?'=>'cost','Como planejar uma rota?'=>'planning','Como confirmar o POD?'=>'pod','Quais entregas têm maior risco?'=>'risk','Qual o OTD hoje?'=>'performance','Quais veículos estão disponíveis?'=>'fleet'] as $question=>$intent)verify(LocalAssistant::classify($question)['intent']===$intent,'Reconhece intenção: '.$intent);
+$ai=new Intelligence;
+$reply=$ai->chatReply('Como está o desempenho hoje?');verify($reply['source']==='local'&&$reply['context']['from']===date('Y-m-d'),'Local é padrão e funciona mesmo com chave presente sem chamar provedor');
+$reply=$ai->chatReply('E ontem?');verify($reply['intent']==='performance'&&$reply['context']['from']===date('Y-m-d',strtotime('-1 day')),'Pergunta complementar mantém assunto e muda período');
+$reply=$ai->chatReply('Qual região tem maior custo?');$reply=$ai->chatReply('E no Centro?');verify($reply['intent']==='cost'&&$reply['context']['region']==='Centro'&&str_contains($reply['text'],'Centro'),'Pergunta complementar filtra região autorizada');
+$reply=$ai->chatReply('Previsão de demanda para 7 dias');verify(str_contains($reply['text'],'próximos 7 dias')&&str_contains($reply['text'],'MAE'),'Previsão local usa modelo e informa validação');
+$reply=$ai->chatReply('E nos próximos 30 dias?');verify($reply['intent']==='forecast'&&str_contains($reply['text'],'próximos 30 dias'),'Contexto muda horizonte de previsão');
+$reference=DB::one("SELECT reference FROM deliveries WHERE reference LIKE 'PED-SIM-%' AND status='pendente' LIMIT 1")['reference'];
+$reply=$ai->chatReply('Qual o status de '.$reference.'?');verify(str_contains($reply['text'],$reference)&&str_contains($reply['text'],'Pendente'),'Consulta referência real com status e janela');
+$reply=$ai->chatReply('E qual a janela?');verify($reply['context']['reference']===$reference&&str_contains($reply['text'],'Janela:'),'Mantém referência do pedido no contexto');
+$reply=$ai->chatReply("PED-NAOEXISTE' OR 1=1 --");verify(str_contains($reply['text'],'não encontrado'),'Referência inexistente/injeção não revela registros');
+$reply=$ai->chatReply('Quais entregas têm maior risco?');verify(str_contains($reply['text'],'escore')&&str_contains($reply['text'],'Ação:'),'Risco local apresenta ranking e ações verificáveis');
+$reply=$ai->chatReply('Como planejar uma rota?');verify(str_contains($reply['text'],'capacidade')&&str_contains($reply['text'],'autonomia'),'Orientação de planejamento usa base de conhecimento');
+$reply=$ai->chatReply('Escreva uma receita de bolo');verify($reply['intent']==='unknown'&&str_contains($reply['text'],'Não consegui'),'Assunto desconhecido pede reformulação sem inventar resposta');
+$reply=$ai->chatReply('Qual o desempenho entre 2026-01-01 e 2026-01-31?');verify($reply['context']['from']==='2026-01-01'&&$reply['context']['to']==='2026-01-31','Aceita intervalo explícito validado');
+HelperConversation::clear();for($i=0;$i<10;$i++)$ai->chatReply('Olá');verify(count(HelperConversation::messages())===16,'Histórico limitado às oito perguntas recentes');
+HelperConversation::clear();verify(HelperConversation::messages()===[]&&HelperConversation::context()===[],'Limpar remove histórico e contexto');
+$ai->chatReply('Qual o desempenho hoje?');
+$other=DB::one("SELECT id FROM users WHERE email='outro@example.test'");$_SESSION['user_id']=$other['id'];
+verify(HelperConversation::messages()===[],'Histórico não atravessa usuários/perfis');
+$reply=$ai->chatReply('Qual o status de '.$reference.'?');verify(str_contains($reply['text'],'não encontrado'),'Motorista não consulta pedido alheio');
+$reply=$ai->chatReply('Previsão de demanda');verify(str_contains($reply['text'],'destinada à gestão')&&!str_contains($reply['text'],'Centro'),'Motorista não recebe previsão regional global');
+$reply=$ai->chatReply('Quais veículos estão disponíveis?');verify(str_contains($reply['text'],'não está vinculado'),'Motorista consulta apenas seu próprio vínculo');
+$reply=$ai->chatReply('Quais alertas estão abertos?');verify(str_contains($reply['text'],'destinada à gestão'),'Motorista não recebe central de alertas global');
+$dispatcher=DB::one("SELECT id FROM users WHERE email='sim.despachante@example.test'");$_SESSION['user_id']=$dispatcher['id'];
+$reply=$ai->chatReply('Quais veículos estão disponíveis?');verify(!str_contains($reply['actions'][0]['url'],'vehicles'),'Despachante recebe ação para página permitida');
+$_SESSION['user_id']=$admin['id'];HelperConversation::clear();putenv('GEMINI_API_KEY=');
+echo "$count verificações do assistente local aprovadas.\n";
